@@ -78,6 +78,8 @@ jobs:
         run: make -C regression/smv test-z3
       - name: Run the vlindex tests
         run: make -C regression/vlindex test
+      - name: Run the hw-cbmc tests
+        run: make -C regression/hw-cbmc test
       - name: Print ccache stats
         run: ccache -s
 
@@ -147,6 +149,8 @@ jobs:
         run: make -C regression/smv test-z3
       - name: Run the vlindex tests
         run: make -C regression/vlindex test
+      - name: Run the hw-cbmc tests
+        run: make -C regression/hw-cbmc test
       - name: Print ccache stats
         run: ccache -s
       - name: Upload the ebmc binary
@@ -316,6 +320,8 @@ jobs:
         run: make -C regression/smv test
       - name: Run the vlindex tests
         run: make -C regression/vlindex test
+      - name: Run the hw-cbmc tests
+        run: make -C regression/hw-cbmc test
       - name: Print ccache stats
         run: ccache -s
 
@@ -370,6 +376,8 @@ jobs:
         run: make -C regression/smv test-z3
       - name: Run the vlindex tests
         run: make -C regression/vlindex test
+      - name: Run the hw-cbmc tests
+        run: make -C regression/hw-cbmc test
       - name: Print ccache stats
         run: ccache -s
 
@@ -591,3 +599,5 @@ jobs:
         run: make -C regression/smv test-z3 TEST_PL="../../lib/cbmc/regression/test.pl -K"
       - name: Run the vlindex tests
         run: make -C regression/vlindex test TEST_PL="../../lib/cbmc/regression/test.pl -K"
+      - name: Run the hw-cbmc tests
+        run: make -C regression/hw-cbmc test TEST_PL="../../lib/cbmc/regression/test.pl -K"
