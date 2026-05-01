@@ -20,15 +20,11 @@ Author: Daniel Kroening, kroening@kroening.com
 
 #include <ansi-c/goto-conversion/goto_convert_functions.h>
 #include <ebmc/show_modules.h>
-#include <goto-checker/all_properties_verifier_with_trace_storage.h>
-#include <goto-checker/goto_verifier.h>
-#include <goto-checker/multi_path_symex_checker.h>
-#include <goto-checker/solver_factory.h>
 #include <langapi/mode.h>
-#include <trans-word-level/trans_trace_word_level.h>
-#include <trans-word-level/unwind.h>
+#include <linking/static_lifetime_init.h>
 
 #include "gen_interface.h"
+#include "hw_cbmc_checker.h"
 #include "map_vars.h"
 
 #include <iostream>
@@ -79,13 +75,9 @@ int hw_cbmc_parse_optionst::doit()
   if(cmdline.isset("vcd"))
     options.set_option("vcd", cmdline.get_value("vcd"));
 
-  std::unique_ptr<goto_verifiert> verifier = nullptr;
-  verifier = std::make_unique<
-    all_properties_verifier_with_trace_storaget<multi_path_symex_checkert>>(
+  std::unique_ptr<hw_cbmc_verifiert> verifier = nullptr;
+  verifier = std::make_unique<hw_cbmc_verifiert>(
     options, ui_message_handler, goto_model);
-
-  // TODO : implement custom goto-checker/verifier that would support
-  // do-unwind-module and add-constraints (see below)
 
   int get_goto_program_ret =
       get_goto_program(goto_model, options, cmdline, ui_message_handler);
@@ -102,23 +94,37 @@ int hw_cbmc_parse_optionst::doit()
   if (cbmc_parse_optionst::process_goto_program(goto_model, options, log))
     return CPROVER_EXIT_INTERNAL_ERROR;
 
-  unwind_no_timeframes = get_bound();
-  unwind_module = get_top_module();
+  // map_vars added new static-lifetime symbols (top_array, hw-cbmc::timeframe)
+  // and updated existing ones (notably setting top.value = top_array[0] and
+  // bound = no_timeframes-1). The CPROVER_initialize function was generated
+  // by get_goto_program before these updates, so regenerate it now from the
+  // (now-updated) symbol values.
+  recreate_initialize_function(goto_model, ui_message_handler);
 
-  // TODO : reimplement `do_module_unwind` inside the new custom verifier
+  // Hand the Verilog transition system and the C<->HDL bridge constraints
+  // to the checker so it can inject them into the same decision procedure
+  // that holds the C-side symex equation.
+  {
+    irep_idt top_module = get_top_module();
+    std::size_t no_timeframes = get_bound();
 
-  // the 'extra constraints'
-  if (!constraints.empty()) {
-    log.status() << "converting constraints" << messaget::eom;
-
-    for (const auto &constraint : constraints) {
-      // TODO : include the extra constraints using the new custom verifier
-      // interface
-      (void)constraint;
+    if (!top_module.empty() && no_timeframes > 0) {
+      namespacet ns(goto_model.symbol_table);
+      verifier->checker().set_top_module(top_module);
+      verifier->checker().set_no_timeframes(no_timeframes);
+      verifier->checker().set_transition_system(
+        to_trans_expr(ns.lookup(top_module).value));
     }
+
+    verifier->checker().add_constraints(std::move(constraints));
   }
 
   label_properties(goto_model.goto_functions);
+
+  // Now that goto_model is fully populated and labelled, repopulate the
+  // verifier's properties map (the wrapper's constructor seeded it with
+  // an empty model since we constructed the verifier early).
+  verifier->refresh_properties();
 
   if (cmdline.isset("show-properties")) {
     show_properties(goto_model, ui_message_handler);
@@ -281,56 +287,4 @@ void hw_cbmc_parse_optionst::help()
     " --gen-interface              print C for interface to module\n"
     " --vcd file                   dump error trace in VCD format\n"
     "\n";
-}
-
-void hw_cbmc_parse_optionst::do_unwind_module(prop_convt &prop_conv) {
-  if (unwind_module == "" || unwind_no_timeframes == 0)
-    return;
-
-  namespacet ns{goto_model.symbol_table};
-  const symbolt &symbol = ns.lookup(unwind_module);
-
-  log.status() << "Unwinding transition system `" << symbol.name << "' with "
-               << unwind_no_timeframes << " time frames" << messaget::eom;
-
-  //  auto dp= get_decision_procedure();
-
-  ::unwind(to_trans_expr(symbol.value), ui_message_handler, prop_conv,
-           unwind_no_timeframes, ns, true);
-
-  log.status() << "Unwinding transition system done" << messaget::eom;
-}
-
-void hw_cbmc_parse_optionst::show_unwind_trace(const optionst &options,
-                                               const prop_convt &prop_conv) {
-  if (unwind_module == "" || unwind_no_timeframes == 0)
-    return;
-
-  namespacet ns{goto_model.symbol_table};
-  auto trans_trace =
-    compute_trans_trace(prop_conv, unwind_no_timeframes, ns, unwind_module);
-
-  if (options.get_option("vcd") != "") {
-    if (options.get_option("vcd") == "-")
-      show_trans_trace_vcd(trans_trace, log, ns, std::cout);
-    else {
-      std::ofstream out(widen_if_needed(options.get_option("vcd")));
-      show_trans_trace_vcd(trans_trace, log, ns, out);
-    }
-  }
-
-  switch(ui_message_handler.get_ui())
-  {
-  case ui_message_handlert::uit::PLAIN:
-    show_trans_trace(trans_trace, log, ns, std::cout);
-    break;
-
-  case ui_message_handlert::uit::XML_UI:
-    show_trans_trace_xml(trans_trace, log, ns, std::cout);
-    break;
-
-  case ui_message_handlert::uit::JSON_UI:
-    show_trans_trace_json(trans_trace, log, ns, std::cout);
-    break;
-  }
 }

@@ -10,11 +10,13 @@ Author: Daniel Kroening, kroening@kroening.com
 #include <util/config.h>
 #include <util/ebmc_util.h>
 #include <util/namespace.h>
+#include <util/ssa_expr.h>
 #include <util/std_code.h>
 #include <util/std_expr.h>
 
 #include <langapi/language_util.h>
 #include <trans-word-level/instantiate_word_level.h>
+#include <verilog/verilog_types.h>
 
 #include "map_vars.h"
 #include "next_timeframe.h"
@@ -179,12 +181,6 @@ void map_varst::set_transition(exprt &expr, std::size_t transition)
     DATA_INVARIANT(
       index_expr.array().id() == ID_symbol,
       "must have index into array symbol");
-
-    symbol_exprt &symbol=to_symbol_expr(index_expr.array());
-
-    // rename that symbol!
-    symbol.set_identifier(
-      id2string(symbol.get_identifier())+"#0");
 
     index_expr.index()=from_integer(transition, index_expr.index().type());
   }
@@ -354,6 +350,68 @@ void map_varst::add_constraint_rec(
   const typet &t1 = program_symbol.type();
   const typet &t2 = module_symbol.type();
 
+  // For array-typed bridge constraints, decompose element-wise. boolbv
+  // allocates a separate SAT literal for each ssa_exprt with a compound
+  // identifier (e.g. top_array#0[[0]]..array[[i]]), so a whole-array
+  // equality on the C side wouldn't propagate to those per-element
+  // literals.
+  if(
+    t1.id() == ID_array && t2.id() == ID_array &&
+    to_array_type(t1).size().is_constant() &&
+    to_array_type(t2).size().is_constant())
+  {
+    auto t1_size = numeric_cast<mp_integer>(to_array_type(t1).size());
+    auto t2_size = numeric_cast<mp_integer>(to_array_type(t2).size());
+    if(t1_size.has_value() && t2_size.has_value() &&
+       *t1_size == *t2_size && *t1_size >= 0)
+    {
+      const exprt &p_orig =
+        is_ssa_expr(program_symbol)
+          ? to_ssa_expr(program_symbol).get_original_expr()
+          : program_symbol;
+
+      // The C side is a flat array indexed 0..size-1 in storage order.
+      // The Verilog side, if it carries declaration metadata, may use a
+      // different storage layout: for `reg [9:0] arr` the Verilog
+      // user-index 0 lives at internal slot 9, etc.
+      // verilog_lowering applies that translation when the user writes
+      // arr[i] in HDL source, but here we are constructing index_exprts
+      // directly, so we have to reproduce the same translation manually
+      // to keep the bridge talking to the slot the user intended.
+      const bool t2_is_verilog =
+        t2.get(ID_C_verilog_type) == ID_verilog_unpacked_array ||
+        t2.get(ID_C_verilog_type) == ID_verilog_packed_array;
+
+      for(mp_integer i = 0; i < *t1_size; ++i)
+      {
+        index_exprt p_i(
+          p_orig,
+          from_integer(i, c_index_type()),
+          to_array_type(t1).element_type());
+        ssa_exprt p_ssa(p_i);
+        p_ssa.set_level_2(0);
+
+        mp_integer m_idx = i;
+        if(t2_is_verilog)
+        {
+          const auto &vt = to_verilog_array_type(t2);
+          if(vt.increasing())
+            m_idx = i - vt.offset();
+          else
+            m_idx = vt.offset() + vt.size_int() - 1 - i;
+        }
+
+        index_exprt m_i(
+          module_symbol,
+          from_integer(m_idx, c_index_type()),
+          to_array_type(t2).element_type());
+
+        add_constraint_rec(p_ssa, m_i);
+      }
+      return;
+    }
+  }
+
   // check the type
   if(t1==t2)
   {
@@ -388,11 +446,16 @@ void map_varst::map_var(
   const symbolt &module_symbol,
   std::size_t transition)
 {
-  // we have s[0].a.b.c
-  // make that s#0[transition].a.b.c
+  // We have s[0].a.b.c. Build an ssa_exprt with concrete index
+  // [transition] and L2 generation 0 so that boolbv keys it on the same
+  // identifier goto-symex emits when reading top_array[transition].field
+  // (the array is shared / never written, so its initial L2 == 0).
 
   exprt e1=program_symbol;
   set_transition(e1, transition);
+
+  ssa_exprt ssa_e1(e1);
+  ssa_e1.set_level_2(0);
 
   // rhs: symbol
   exprt e2=symbol_exprt(module_symbol.name, module_symbol.type);
@@ -401,7 +464,7 @@ void map_varst::map_var(
   ns.follow_macros(e2);
   instantiate_symbol(e2, transition);
   
-  add_constraint_rec(e1, e2);
+  add_constraint_rec(ssa_e1, e2);
 }
 
 /*******************************************************************\
@@ -420,7 +483,13 @@ const symbolt &map_varst::add_array(symbolt &symbol)
 {
   const namespacet ns(symbol_table);
 
-  const typet &full_type = symbol.type;
+  // Resolve struct_tag to the underlying struct so the array's element
+  // type is consistent with the struct literals goto-symex constructs
+  // when unrolling top_array[t] reads (otherwise boolbv hits an
+  // equal_exprt type mismatch between struct_tag and struct).
+  typet full_type = symbol.type;
+  if(full_type.id() == ID_struct_tag)
+    full_type = ns.follow_tag(to_struct_tag_type(full_type));
 
   if(full_type.id()==ID_incomplete_array)
   {
@@ -437,7 +506,13 @@ const symbolt &map_varst::add_array(symbolt &symbol)
   array_typet new_type(full_type, array_size);
   
   new_symbol.type=new_type;
-  new_symbol.value=exprt(ID_nondet);
+  // Mark the array as a free variable: skip both nondet-init and zero-init
+  // in __CPROVER_initialize. Otherwise static_lifetime_init would emit a
+  // top_array := <nondet> assignment, bumping top_array's SSA L2 generation
+  // to #1 — which would no longer match the bridge constraints (which
+  // reference top_array#0).
+  new_symbol.value = exprt(ID_nondet);
+  new_symbol.value.set(ID_C_no_nondet_initialization, true);
   new_symbol.name=id2string(new_symbol.name)+"_array";
   new_symbol.base_name=id2string(new_symbol.base_name)+"_array";
 
@@ -508,8 +583,10 @@ void map_varst::map_var_rec(
   const irep_idt &prefix)
 {
   const namespacet ns(symbol_table);
-  const typet &expr_type = expr.type();
-  const struct_typet &struct_type=to_struct_type(expr_type);
+  const struct_typet &struct_type =
+    expr.type().id() == ID_struct_tag
+      ? ns.follow_tag(to_struct_tag_type(expr.type()))
+      : to_struct_type(expr.type());
   const struct_typet::componentst &components=struct_type.components();
 
   for(struct_typet::componentst::const_iterator
@@ -529,7 +606,12 @@ void map_varst::map_var_rec(
     else
       base_name=name;
 
-    bool module_instance = c_it->type().id() == ID_struct;
+    // The C frontend records nested module instances as struct_tag
+    // references; resolve before classifying.
+    typet member_type = c_it->type();
+    if(member_type.id() == ID_struct_tag)
+      member_type = ns.follow_tag(to_struct_tag_type(member_type));
+    bool module_instance = member_type.id() == ID_struct;
 
     irep_idt full_name=id2string(prefix)+"."+id2string(base_name);
 
@@ -704,6 +786,13 @@ void map_varst::map_vars(const irep_idt &top_module)
               << "' should be extern" << eom;
       throw 0;
     }
+
+    // Resolve struct_tag on the top-level struct symbol so all subsequent
+    // references (top.x in C, top_array[t].x in the bridge) share a single
+    // resolved struct type. Mixing struct_tag and resolved struct trips
+    // boolbv's equal_exprt type check during equation conversion.
+    if(s.type.id() == ID_struct_tag)
+      s.type = ns.follow_tag(to_struct_tag_type(s.type));
 
     const symbolt &array_symbol=add_array(s);
 

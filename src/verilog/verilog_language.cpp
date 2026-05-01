@@ -14,9 +14,14 @@ Author: Daniel Kroening, kroening@kroening.com
 #include "verilog_language.h"
 #include "verilog_typecheck.h"
 #include "verilog_synthesis.h"
+#include "verilog_elaborate_compilation_unit.h"
 #include "expr2verilog.h"
 #include "verilog_parser.h"
 #include "verilog_preprocessor.h"
+
+#include <ebmc/ebmc_error.h>
+
+#include <util/message.h>
 
 /*******************************************************************\
 
@@ -174,7 +179,32 @@ bool verilog_languaget::typecheck(
   const std::string &module,
   message_handlert &message_handler)
 {
-  return true;
+  if(module.empty())
+    return false;
+
+  // Already typechecked (e.g. via a dependency triggering this module's
+  // typecheck recursively from typecheck_module).
+  if(symbol_table.symbols.find(module) != symbol_table.symbols.end())
+    return false;
+
+  if(verilog_typecheck(
+       symbol_table,
+       module,
+       parse_tree.standard,
+       warn_implicit_nets,
+       message_handler))
+    return true;
+
+  if(verilog_synthesis(
+       symbol_table,
+       module,
+       parse_tree.standard,
+       ignore_initial,
+       initial_zero,
+       message_handler))
+    return true;
+
+  return false;
 }
 
 /*******************************************************************\
@@ -189,8 +219,25 @@ Function: verilog_languaget::interfaces
 
 \*******************************************************************/
 
-bool verilog_languaget::interfaces(symbol_table_baset &, message_handlert &)
+bool verilog_languaget::interfaces(
+  symbol_table_baset &symbol_table,
+  message_handlert &message_handler)
 {
+  // Copy each module's parse-tree source into the symbol table as a
+  // "<module>$source" symbol, and typecheck packages and compilation-unit
+  // declarations. verilog_typecheck (called later per module) requires
+  // the corresponding "$source" symbol to exist.
+  try
+  {
+    verilog_elaborate_compilation_unit(
+      parse_tree, warn_implicit_nets, symbol_table, message_handler);
+  }
+  catch(const ebmc_errort &e)
+  {
+    messaget log{message_handler};
+    log.error() << e.what() << messaget::eom;
+    return true;
+  }
   return false;
 }
 

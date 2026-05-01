@@ -21,6 +21,7 @@ Author: Daniel Kroening, kroening@kroening.com
 
 #include "expr2verilog.h"
 #include "verilog_expr.h"
+#include "verilog_initializer.h"
 #include "verilog_types.h"
 
 #include <cassert>
@@ -359,6 +360,23 @@ exprt verilog_typecheckt::elaborate_constant_function_call(
       convert_statement(statement);
 
     function_body = decl.body();
+
+    // Default-initialize each declared local variable so that the
+    // function body can read its own outputs / locals before they have
+    // been assigned (IEEE 1800 Table 6-7). Without this, the first read
+    // of an uninitialized reg returns nil, and any expression involving
+    // that read fails the "constant" check inside the interpreter.
+    // Inputs declared here will be overwritten with the call arguments
+    // immediately below, so it is safe to initialize them too.
+    for(auto &inner_decl : decl.declarations())
+    {
+      for(auto &declarator : inner_decl.declarators())
+      {
+        auto init = verilog_default_initializer(declarator.type());
+        if(init.has_value())
+          vars[declarator.identifier()] = *init;
+      }
+    }
   }
   else
   {
@@ -368,6 +386,15 @@ exprt verilog_typecheckt::elaborate_constant_function_call(
 
   const code_typet &code_type=
     to_code_type(function_symbol.type);
+
+  // The return register lives at <function_symbol.name>.<base_name> and
+  // is not in decl.declarations(); default-initialize it separately.
+  {
+    auto init = verilog_default_initializer(code_type.return_type());
+    if(init.has_value())
+      vars[id2string(function_symbol.name) + "." +
+           id2string(function_symbol.base_name)] = *init;
+  }
 
   const code_typet::parameterst &parameters=
     code_type.parameters();
