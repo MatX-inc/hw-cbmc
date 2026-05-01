@@ -583,7 +583,12 @@ void map_varst::map_var_rec(
     else
       base_name=name;
 
-    bool module_instance = c_it->type().id() == ID_struct;
+    // The C frontend records nested module instances as struct_tag
+    // references; resolve before classifying.
+    typet member_type = c_it->type();
+    if(member_type.id() == ID_struct_tag)
+      member_type = ns.follow_tag(to_struct_tag_type(member_type));
+    bool module_instance = member_type.id() == ID_struct;
 
     irep_idt full_name=id2string(prefix)+"."+id2string(base_name);
 
