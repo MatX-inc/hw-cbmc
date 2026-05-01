@@ -1,5 +1,6 @@
-SRC = hw_cbmc_main.cpp hw_cbmc_parse_options.cpp next_timeframe.cpp \
-      map_vars.cpp gen_interface.cpp set_inputs.cpp hw_cbmc_languages.cpp \
+SRC = hw_cbmc_main.cpp hw_cbmc_parse_options.cpp hw_cbmc_checker.cpp \
+      next_timeframe.cpp map_vars.cpp gen_interface.cpp set_inputs.cpp \
+      hw_cbmc_languages.cpp \
       $(CPROVER_DIR)/cbmc/c_test_input_generator.cpp
 
 OBJ+= $(CPROVER_DIR)/goto-checker/goto-checker$(LIBEXT) \
