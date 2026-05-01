@@ -1,4 +1,4 @@
-CORE
+KNOWNBUG
 main.c
 --module top --bound 10 main.v
 ^EXIT=0$
@@ -6,3 +6,16 @@ main.c
 ^VERIFICATION SUCCESSFUL$
 --
 ^warning: ignoring
+--
+Marked KNOWNBUG: triggers an upstream cbmc invariant failure in
+goto_check_c.cpp::bounds_check_index. The hand-written main.c uses
+__CPROVER_bool var1[101] (an array of 101 1-bit elements) inside a
+struct, indexed by a signed int. cbmc's build_object_descriptor_rec
+returns a typeless ID_unknown offset because the element size is
+sub-byte, and the lower-bound check then calls
+from_integer(0, ode.offset().type()) on the empty type and aborts.
+The combination (sub-byte element + struct member + signed index) is
+not exercised by upstream cbmc's own tests. hw-cbmc's gen_interface
+generates the same bit-vector as a single __CPROVER_bitvector[101]
+field, which would side-step the bug; revisit this test when the
+upstream cbmc bug is fixed or the test is rewritten to that form.
