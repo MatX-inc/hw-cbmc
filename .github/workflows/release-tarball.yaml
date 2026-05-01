@@ -23,7 +23,7 @@ jobs:
         run: |
           dnf install 'dnf-command(config-manager)' -y
           dnf config-manager --enable powertools -y
-          dnf install -y gcc-c++ make flex bison git wget libstdc++-static
+          dnf install -y gcc-c++ make flex bison git wget patch libstdc++-static
 
       - uses: actions/checkout@v6
 
