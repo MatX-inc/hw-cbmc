@@ -16,6 +16,7 @@ Author: Daniel Kroening, kroening@kroening.com
 
 #include <langapi/language_util.h>
 #include <trans-word-level/instantiate_word_level.h>
+#include <verilog/verilog_types.h>
 
 #include "map_vars.h"
 #include "next_timeframe.h"
@@ -369,6 +370,18 @@ void map_varst::add_constraint_rec(
           ? to_ssa_expr(program_symbol).get_original_expr()
           : program_symbol;
 
+      // The C side is a flat array indexed 0..size-1 in storage order.
+      // The Verilog side, if it carries declaration metadata, may use a
+      // different storage layout: for `reg [9:0] arr` the Verilog
+      // user-index 0 lives at internal slot 9, etc.
+      // verilog_lowering applies that translation when the user writes
+      // arr[i] in HDL source, but here we are constructing index_exprts
+      // directly, so we have to reproduce the same translation manually
+      // to keep the bridge talking to the slot the user intended.
+      const bool t2_is_verilog =
+        t2.get(ID_C_verilog_type) == ID_verilog_unpacked_array ||
+        t2.get(ID_C_verilog_type) == ID_verilog_packed_array;
+
       for(mp_integer i = 0; i < *t1_size; ++i)
       {
         index_exprt p_i(
@@ -378,9 +391,19 @@ void map_varst::add_constraint_rec(
         ssa_exprt p_ssa(p_i);
         p_ssa.set_level_2(0);
 
+        mp_integer m_idx = i;
+        if(t2_is_verilog)
+        {
+          const auto &vt = to_verilog_array_type(t2);
+          if(vt.increasing())
+            m_idx = i - vt.offset();
+          else
+            m_idx = vt.offset() + vt.size_int() - 1 - i;
+        }
+
         index_exprt m_i(
           module_symbol,
-          from_integer(i, c_index_type()),
+          from_integer(m_idx, c_index_type()),
           to_array_type(t2).element_type());
 
         add_constraint_rec(p_ssa, m_i);
