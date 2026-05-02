@@ -1,0 +1,144 @@
+name: Release tarball
+
+# Produce hw-cbmc tarballs (`inst/bin/{ebmc,hw-cbmc,vlindex}` inside
+# `inst.tar.gz`) for consumption by the matx Bazel build, mirroring the
+# MatX-inc/bsc `rocky.yml` setup. See third_party/hw-cbmc/README.md in the
+# matx repo for the consumption side.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-linux-x86_64:
+    name: 'Linux x86_64 (Rocky 8)'
+    runs-on: ubuntu-latest
+    container: rockylinux:8.9.20231119
+    steps:
+      - name: Install dependencies
+        shell: bash
+        run: |
+          dnf install 'dnf-command(config-manager)' -y
+          dnf config-manager --enable powertools -y
+          dnf install -y gcc-c++ make flex bison git wget patch libstdc++-static
+
+      - uses: actions/checkout@v6
+
+      - name: Checkout submodules
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          git submodule update --init --recursive
+
+      - name: Get cadical and minisat
+        run: make -C lib/cbmc/src cadical-download minisat2-download
+
+      - name: Build
+        run: |
+          # -static-libstdc++ keeps the binaries portable across glibc versions
+          # we ship to (tested on CentOS, Fedora, Amazon Linux).
+          make CXX="g++ -Wno-class-memaccess" LIBS="-lstdc++fs" \
+               LINKFLAGS="-static-libstdc++" \
+               -C src -j$(nproc) \
+               MINISAT2=../../minisat-2.2.1 CADICAL=../../cadical
+
+      - name: Stage tarball
+        run: |
+          mkdir -p inst/bin
+          cp src/ebmc/ebmc inst/bin/
+          cp src/hw-cbmc/hw-cbmc inst/bin/
+          cp src/vlindex/vlindex inst/bin/
+          strip inst/bin/*
+          tar czf inst.tar.gz inst
+
+      - name: Smoketest
+        run: |
+          inst/bin/ebmc --version
+          inst/bin/hw-cbmc --version
+          inst/bin/vlindex --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64 build
+          path: inst.tar.gz
+
+  build-darwin-aarch64:
+    name: 'macOS aarch64'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Fetch dependencies
+        run: brew install bison
+
+      - name: Get cadical and minisat
+        run: make -C lib/cbmc/src cadical-download minisat2-download
+
+      - name: Build
+        run: |
+          make YACC="/opt/homebrew/opt/bison/bin/bison" CXX="clang++" \
+               -C src -j3 \
+               MINISAT2=../../minisat-2.2.1 CADICAL=../../cadical
+
+      - name: Stage tarball
+        run: |
+          mkdir -p inst/bin
+          cp src/ebmc/ebmc inst/bin/
+          cp src/hw-cbmc/hw-cbmc inst/bin/
+          cp src/vlindex/vlindex inst/bin/
+          strip inst/bin/*
+          tar czf inst.tar.gz inst
+
+      - name: Smoketest
+        run: |
+          inst/bin/ebmc --version
+          inst/bin/hw-cbmc --version
+          inst/bin/vlindex --version
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: darwin-aarch64 build
+          path: inst.tar.gz
+
+  publish-release:
+    name: 'Publish GitHub release'
+    needs: [build-linux-x86_64, build-darwin-aarch64]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-x86_64 build
+          path: linux
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: darwin-aarch64 build
+          path: darwin
+
+      - name: Rename tarballs
+        run: |
+          mv linux/inst.tar.gz hw-cbmc-linux-x86_64-${{ github.sha }}.tar.gz
+          mv darwin/inst.tar.gz hw-cbmc-darwin-aarch64-${{ github.sha }}.tar.gz
+
+      - name: Create GitHub release
+        run: |
+          gh release create "build-${{ github.sha }}" \
+            --repo "${{ github.repository }}" \
+            --title "build-${{ github.sha }}" \
+            --notes "Automated build for commit ${{ github.sha }}." \
+            hw-cbmc-linux-x86_64-${{ github.sha }}.tar.gz \
+            hw-cbmc-darwin-aarch64-${{ github.sha }}.tar.gz
